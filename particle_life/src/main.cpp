@@ -4,11 +4,9 @@
 
 //========================================================================
 int main( ){
-	ofSetupOpenGL(1600,900,OF_WINDOW);			// <-------- setup the GL context
-
-	// this kicks off the running of my app
-	// can be OF_WINDOW or OF_FULLSCREEN
-	// pass in width and height too:
+	ofGLWindowSettings s;
+	//s.setGLVersion(4, 6);	// OpenGL 4.6 ( GTX 600 and up )
+	s.setSize(1600, 900);
+	ofCreateWindow(s);
 	ofRunApp(new ofApp());
-
 }

@@ -1,188 +1,178 @@
 #include "ofApp.h"
+#include "ofUtils.h"
 
 #include <iostream>
 #include <vector>
-#include <omp.h>
+#include <random>
+//#include "oneapi/tbb.h"
 
-// parameters for image positions
-float xshift = 400;
-float yshift = 80;
-float anchor = 0;
-float length = 70;
-float p1x = anchor+xshift;
-float p1y = anchor+yshift;
-float p2x = anchor+length+xshift;
-float p2y = anchor+yshift;
-float p3x = anchor+length+xshift;
-float p3y = anchor+length+yshift;
-float p4x = anchor + xshift;
-float p4y = anchor + length + yshift;
-float rr = 8;
-int countThresh = 0;
-std::string fps_text;
 
 //Simulation parameters
-int cntFps = 0;
-clock_t now, lastTime, delta;
 
-//Particle groups by color
-std::vector<point> green;
-std::vector<point> red;
-std::vector<point> white;
-std::vector<point> blue;
+// Create a group of particles with the same color and return it in a vector
+colorGroup CreatePoints(const int num, ofColor color) noexcept
+{
+	colorGroup points;
+	points.pos.reserve(num);
+	points.vel.reserve(num);
+	points.color = color;
 
-
-//Get random float in range <a,b>
-float RandomFloat(const float a, const float b) {
-	const float diff = b - a;
-	const float r = ofRandomuf() * diff;
-    return a + r;
+	for (auto i = 0; i < num; i++)
+	{
+		int x = static_cast<int>(ofRandomWidth());
+		int y = static_cast<int>(ofRandomHeight());	
+		points.pos.emplace_back(x,y);
+		points.vel.emplace_back(0.0F, 0.0F);
+	}
+		
+	return points;
 }
 
-//Draw all points from given group
-void Draw(const std::vector<point>* points) {
-    for (int i = 0; i < points->size(); i++) {
-        (* points)[i].draw();
-    }
+// compute and apply the interaction between two groups of particles
+void ofApp::interaction(colorGroup& Group1, const colorGroup& Group2, 
+		const float G, const float radius, bool boundsToggle) const noexcept
+{
+	
+	assert(Group1.pos.size() % 64 == 0);
+	assert(Group2.pos.size() % 64 == 0);
+	
+	const float g = G / -100;	// attraction coefficient
+
+	//#pragma omp parallel
+	for (size_t i = 0; i < Group1.pos.size(); i++)
+	{
+		float fx = 0.0F;	// force on x
+		float fy = 0.0F;	// force on y
+		
+		
+		for (size_t j = 0; j < Group2.pos.size(); j++)
+		{
+			if (Group1.pos[i] != Group2.pos[j])
+			{
+				const float distance_squared = ((Group1.pos[i].x - Group2.pos[j].x) * (Group1.pos[i].x - Group2.pos[j].x))
+					+ ((Group1.pos[i].y - Group2.pos[j].y) * (Group1.pos[i].y - Group2.pos[j].y));
+
+				// if distance < radius, apply the force, otherwise, force = 0
+	//			const float force = distance_squared < radius*radius ? 1 / (std::max(std::numeric_limits<float>::epsilon(), std::sqrtf(distance_squared))) : 0.0F;
+	//			fx += ((Group1.pos[i].x - Group2.pos[j].x) * force);
+	//			fy += ((Group1.pos[i].y - Group2.pos[j].y) * force);
+				const float force = distance_squared < radius* radius ? 1.0F / std::sqrtf(distance_squared) : 0.0F;
+				fx += ((Group1.pos[i].x - Group2.pos[j].x) * force);
+				fy += ((Group1.pos[i].y - Group2.pos[j].y) * force);
+			}
+		}
+
+		// Wall Repel
+		if (wallRepel > 0.0F)
+		{
+			Group1.vel[i].x += Group1.pos[i].x < wallRepel ? (wallRepel - Group1.pos[i].x) * 0.1 : 0.0F;	// x
+			Group1.vel[i].y += Group1.pos[i].y < wallRepel ? (wallRepel - Group1.pos[i].y) * 0.1 : 0.0F;	// x
+			Group1.vel[i].x += Group1.pos[i].x > boundWidth - wallRepel  ? (boundWidth - wallRepel - Group1.pos[i].x) * 0.1  : 0.0F; // y 
+			Group1.vel[i].y += Group1.pos[i].y > boundHeight - wallRepel ? (boundHeight - wallRepel - Group1.pos[i].y) * 0.1 : 0.0F; // y			
+		}
+
+		// Viscosity & gravity
+		Group1.vel[i].x = (Group1.vel[i].x + (fx * g)) * (1.0 - viscosity);
+		Group1.vel[i].y = (Group1.vel[i].y + (fy * g)) * (1.0 - viscosity) + worldGravity;
+
+		//Update position
+		Group1.pos[i].x += Group1.vel[i].x;
+		Group1.pos[i].y += Group1.vel[i].y;
+	}
+
+	// if "bounded" is checked then keep particles inside the window
+	if (boundsToggle) {
+		for (auto& p : Group1.pos)
+		{
+			p.x = std::min(std::max(p.x, 0.0F), static_cast<float>(boundWidth));
+			p.y = std::min(std::max(p.y, 0.0F), static_cast<float>(boundHeight));
+		}
+	}
+	
+}
+	
+
+/**
+ * @brief Generate new sets of points
+ */
+void ofApp::restart()
+{
+	// Ensure that the number of particles is a multiple of 64 in order to use the vectorized version of the interaction function
+	numberSliderG = numberSliderG - (numberSliderG % 64);
+	numberSliderR = numberSliderR - (numberSliderR % 64);
+	numberSliderW = numberSliderW - (numberSliderW % 64);
+	numberSliderY = numberSliderY - (numberSliderY % 64);
+	
+	assert(numberSliderG % 64 == 0);
+	assert(numberSliderR % 64 == 0);
+	assert(numberSliderW % 64 == 0);
+	assert(numberSliderY % 64 == 0);
+	
+	// Create the groups of particles
+	if (numberSliderG > 0) { green  = CreatePoints(numberSliderG, ofColor::green); }
+	if (numberSliderR > 0) { red    = CreatePoints(numberSliderR,   ofColor::red);   }
+	if (numberSliderW > 0) { white  = CreatePoints(numberSliderW, ofColor::white); }
+	if (numberSliderY > 0) { yellow = CreatePoints(numberSliderY,  ofColor::yellow); }
+
+	vbo.setVertexData(green.pos.data(),  green.pos.size(),  GL_STREAM_DRAW);
+	vbo.setVertexData(red.pos.data(),    red.pos.size(),    GL_STREAM_DRAW);
+	vbo.setVertexData(white.pos.data(),  white.pos.size(),  GL_STREAM_DRAW);
+	vbo.setVertexData(yellow.pos.data(), yellow.pos.size(), GL_STREAM_DRAW);
 }
 
-//Generate a number of single colored points randomly distributed on canvas
-std::vector<point> CreatePoints(const int num, int r, int g, int b) {
-    std::vector<point> points;
-    for (int i = 0; i < num; i++) {
-        int x = static_cast<int>(ofRandomWidth());
-        int y = static_cast<int>(ofRandomHeight());
-        points.emplace_back(x, y, r, g, b);
-    }
-    return points;
-}
 
-//Interaction between 2 particle groups
-void ofApp::interaction(std::vector<point>* Group1, const std::vector<point>* Group2, float G, const float radius) {
+/**
+ * @brief Generate initial simulation parameters
+ */
+void ofApp::random()
+{
+	// GREEN
+	//numberSliderG = RandomFloat(0, 3000);
+	powerSliderGG = RandomFloat(-100, 100) * forceVariance;
+	powerSliderGR = RandomFloat(-100, 100) * forceVariance;
+	powerSliderGW = RandomFloat(-100, 100) * forceVariance;
+	powerSliderGY = RandomFloat(-100, 100) * forceVariance;
 
-    //Gravity coefficient
-    const float g = G / -100;
+	vSliderGG = RandomFloat(10, 200) * radiusVariance;
+	vSliderGR = RandomFloat(10, 200) * radiusVariance;
+	vSliderGW = RandomFloat(10, 200) * radiusVariance;
+	vSliderGY = RandomFloat(10, 200) * radiusVariance;
 
-    boundHeight = ofGetHeight();
-    boundWidth = ofGetWidth();
+	// RED
+	//numberSliderR = RandomFloat(0, 3000);
+	powerSliderRR = RandomFloat(-100, 100) * forceVariance;
+	powerSliderRG = RandomFloat(-100, 100) * forceVariance;
+	powerSliderRW = RandomFloat(-100, 100) * forceVariance;
+	powerSliderRY = RandomFloat(-100, 100) * forceVariance;
 
-    omp_set_num_threads(omp_get_num_procs());
-    #pragma omp parallel for
-    //Loop through first group of points
-    for (auto i = 0; i < Group1->size(); i++) {
-        auto p1 = (*Group1)[i];
-		//Force acting on particle
-        float fx = 0;
-        float fy = 0;
-		//Loop through second group of points
-        for (int j = 0; j < Group2->size(); j++) {
-	        const auto p2 = (*Group2)[j];
-			//Calculate the distance between points using Pythagorean theorem
-	        const auto dx = p1.x - p2.x;
-	        const auto dy = p1.y - p2.y;
-	        const auto r = std::sqrt(dx * dx + dy * dy);
-			
-			//Calculate the force in given bounds. 
-            if (r < radius && r > 0) {
-                fx += (dx / r);
-                fy += (dy / r);
-            }
-        }
+	vSliderRG = RandomFloat(10, 200) * radiusVariance;
+	vSliderRR = RandomFloat(10, 200) * radiusVariance;
+	vSliderRW = RandomFloat(10, 200) * radiusVariance;
+	vSliderRY = RandomFloat(10, 200) * radiusVariance;
 
-		//Calculate new velocity
-        p1.vx = (p1.vx + (fx * g)) * (1.0-viscosity);
-        p1.vy = (p1.vy + (fy * g)) * (1.0-viscosity) + worldGravity;
+	// WHITE
+	// numberSliderW = RandomFloat(0, 3000);
+	powerSliderWW = RandomFloat(-100, 100) * forceVariance;
+	powerSliderWR = RandomFloat(-100, 100) * forceVariance;
+	powerSliderWG = RandomFloat(-100, 100) * forceVariance;
+	powerSliderWY = RandomFloat(-100, 100) * forceVariance;
 
-        // Wall Repel
-        if (wallRepel > 0.0F)
-        {
-            if (p1.x < wallRepel)
-                p1.vx += (wallRepel - p1.x) * 0.1;
-            if (p1.x > boundWidth - wallRepel)
-                p1.vx += (boundWidth - wallRepel - p1.x) * 0.1;
+	vSliderWG = RandomFloat(10, 200) * radiusVariance;
+	vSliderWR = RandomFloat(10, 200) * radiusVariance;
+	vSliderWW = RandomFloat(10, 200) * radiusVariance;
+	vSliderWY = RandomFloat(10, 200) * radiusVariance;
 
-            if (p1.y < wallRepel)
-                p1.vy += (wallRepel - p1.y) * 0.1;
-            if (p1.y > boundHeight - wallRepel)
-                p1.vy += (boundHeight - wallRepel - p1.y) * 0.1;
-        }
+	// yellow
+	//numberSliderY = RandomFloat(0, 3000);
+	powerSliderYY = RandomFloat(-100, 100) * forceVariance;
+	powerSliderYW = RandomFloat(-100, 100) * forceVariance;
+	powerSliderYR = RandomFloat(-100, 100) * forceVariance;
+	powerSliderYG = RandomFloat(-100, 100) * forceVariance;
 
-		//Update position based on velocity
-        p1.x += p1.vx;
-        p1.y += p1.vy;
-
-
-		//Checking for canvas bounds
-        if (boundsToggle) {
-            if (p1.x < 0) { p1.vx *= -1; p1.x = 0; }
-            if (p1.x > boundWidth) { p1.vx *= -1; p1.x = boundWidth; }
-            if (p1.y < 0) { p1.vy *= -1; p1.y = 0; }
-            if (p1.y > boundHeight) { p1.vy *= -1; p1.y = boundHeight; }
-
-        }
-        (*Group1)[i] = p1;
-    }
-
-}
-
-//Generate new sets of points
-void ofApp::restart() {
-    if (numberSliderG > 0) { green = CreatePoints(numberSliderG, 100, 250, 10); }
-    if (numberSliderR > 0) { red = CreatePoints(numberSliderR, 250, 10, 100); }
-    if (numberSliderW > 0) { white = CreatePoints(numberSliderW, 250, 250, 250); }
-    if (numberSliderB > 0) { blue = CreatePoints(numberSliderB, 100, 100, 250); }
-}
-
-
-//Generate initial simulation parameters
-void ofApp::random() {
-    // GREEN
-    //numberSliderG = RandomFloat(0, 3000);
-    powerSliderGG = RandomFloat(-100, 100) * forceVariance;
-    powerSliderGR = RandomFloat(-100, 100) * forceVariance;
-    powerSliderGW = RandomFloat(-100, 100) * forceVariance;
-    powerSliderGB = RandomFloat(-100, 100) * forceVariance;
-
-    vSliderGG = RandomFloat(10, 500) * radiusVariance;
-    vSliderGR = RandomFloat(10, 500) * radiusVariance;
-    vSliderGW = RandomFloat(10, 500) * radiusVariance;
-    vSliderGB = RandomFloat(10, 500) * radiusVariance;
-
-    // RED
-    //numberSliderR = RandomFloat(0, 3000);
-    powerSliderRR = RandomFloat(-100, 100) * forceVariance;
-    powerSliderRG = RandomFloat(-100, 100) * forceVariance;
-    powerSliderRW = RandomFloat(-100, 100) * forceVariance;
-    powerSliderRB = RandomFloat(-100, 100) * forceVariance;
-
-    vSliderRG = RandomFloat(10, 500) * radiusVariance;
-    vSliderRR = RandomFloat(10, 500) * radiusVariance;
-    vSliderRW = RandomFloat(10, 500) * radiusVariance;
-    vSliderRB = RandomFloat(10, 500) * radiusVariance;
-
-    // WHITE
-   // numberSliderW = RandomFloat(0, 3000);
-    powerSliderWW = RandomFloat(-100, 100) * forceVariance;
-    powerSliderWR = RandomFloat(-100, 100) * forceVariance;
-    powerSliderWG = RandomFloat(-100, 100) * forceVariance;
-    powerSliderWB = RandomFloat(-100, 100) * forceVariance;
-
-    vSliderWG = RandomFloat(10, 500) * radiusVariance;
-    vSliderWR = RandomFloat(10, 500) * radiusVariance;
-    vSliderWW = RandomFloat(10, 500) * radiusVariance;
-    vSliderWB = RandomFloat(10, 500) * radiusVariance;
-
-    // BLUE
-    //numberSliderB = RandomFloat(0, 3000);
-    powerSliderBB = RandomFloat(-100, 100) * forceVariance;
-    powerSliderBW = RandomFloat(-100, 100) * forceVariance;
-    powerSliderBR = RandomFloat(-100, 100) * forceVariance;
-    powerSliderBG = RandomFloat(-100, 100) * forceVariance;
-
-    vSliderBG = RandomFloat(10, 500) * radiusVariance;
-    vSliderBR = RandomFloat(10, 500) * radiusVariance;
-    vSliderBW = RandomFloat(10, 500) * radiusVariance;
-    vSliderBB = RandomFloat(10, 500) * radiusVariance;
+	vSliderYG = RandomFloat(10, 200) * radiusVariance;
+	vSliderYR = RandomFloat(10, 200) * radiusVariance;
+	vSliderYW = RandomFloat(10, 200) * radiusVariance;
+	vSliderYY = RandomFloat(10, 200) * radiusVariance;
 }
 
 /// this is a cheap and quick way to save and load parameters (openFramework have betters ways but requires some additional library setups) 
@@ -190,283 +180,372 @@ void ofApp::random() {
 void ofApp::saveSettings()
 {
 	const std::vector<float> settings = {
-        powerSliderGG, powerSliderGR, powerSliderGW, powerSliderGB,
-        vSliderGG, vSliderGR, vSliderGW, vSliderGB,
-        powerSliderRG, powerSliderRR, powerSliderRW, powerSliderRB,
-        vSliderRG, vSliderRR, vSliderRW, vSliderRB,
-        powerSliderWG, powerSliderWR, powerSliderWW, powerSliderWB,
-        vSliderWG, vSliderWR, vSliderWW, vSliderWB,
-        powerSliderBG, powerSliderBR, powerSliderBW, powerSliderBB,
-        vSliderBG, vSliderBR, vSliderBW, vSliderBB,
-        static_cast<float>(numberSliderG), static_cast<float>(numberSliderR), static_cast<float>(numberSliderW), static_cast<float>(numberSliderB),
-        viscoSlider
-    };
+		powerSliderGG, powerSliderGR, powerSliderGW, powerSliderGY,
+		vSliderGG, vSliderGR, vSliderGW, vSliderGY,
+		powerSliderRG, powerSliderRR, powerSliderRW, powerSliderRY,
+		vSliderRG, vSliderRR, vSliderRW, vSliderRY,
+		powerSliderWG, powerSliderWR, powerSliderWW, powerSliderWY,
+		vSliderWG, vSliderWR, vSliderWW, vSliderWY,
+		powerSliderYG, powerSliderYR, powerSliderYW, powerSliderYY,
+		vSliderYG, vSliderYR, vSliderYW, vSliderYY,
+		static_cast<float>(numberSliderG),
+		static_cast<float>(numberSliderR),
+		static_cast<float>(numberSliderW),
+		static_cast<float>(numberSliderY),
+		viscoSlider
+	};
 
-    std::string save_path = "";
-    ofFileDialogResult result = ofSystemSaveDialog("model.txt", "Save");
-    if (result.bSuccess) {
-        save_path = result.getPath();
-    }
-    else {
-        ofSystemAlertDialog("Could not Save Model!");
-    }
-    ofstream myfile(save_path);
-    if (myfile.is_open()) {
-        for (int i = 0; i < settings.size(); i++) {
-            myfile << settings[i] << " ";
-        }
-        myfile.close();
-        std::cout << "file saved successfully";
-    }
-    else {
-        std::cout << "unable to save file!";
-    }
-    
+	std::string save_path;
+	ofFileDialogResult result = ofSystemSaveDialog("model.txt", "Save");
+	if (result.bSuccess)
+	{
+		save_path = result.getPath();
+	}
+	else
+	{
+		ofSystemAlertDialog("Could not Save Model!");
+	}
+	ofstream myfile(save_path);
+	if (myfile.is_open())
+	{
+		for (int i = 0; i < settings.size(); i++)
+		{
+			myfile << settings[i] << " ";
+		}
+		myfile.close();
+		std::cout << "file saved successfully";
+	}
+	else
+	{
+		std::cout << "unable to save file!";
+	}
 }
 
 // Dialog gui tested on windows machine only. Not sure if it works on Mac or Linux too.
 void ofApp::loadSettings()
 {
-    std::string load_path;
-    std::string text;
-    ofFileDialogResult result = ofSystemLoadDialog("Load file", false, load_path);
-    if (result.bSuccess) {
-        load_path = result.getPath();
-        std::ifstream t(load_path);
-        std::stringstream loaded;
-        loaded << t.rdbuf();
-        text = loaded.str();
-    }
-    else {
-        ofSystemAlertDialog("Could not Load the File!");
-    }
+	std::string load_path;
+	std::string text;
+	ofFileDialogResult result = ofSystemLoadDialog("Load file", false, load_path);
+	if (result.bSuccess)
+	{
+		load_path = result.getPath();
+		std::ifstream t(load_path);
+		std::stringstream loaded;
+		loaded << t.rdbuf();
+		text = loaded.str();
+	}
+	else
+	{
+		ofSystemAlertDialog("Could not Load the File!");
+	}
 
-    // split text by space and convert them to floats
-    string word;
-    std::vector<float> p;
-    for (auto x : text){
-        if (x == ' '){
-            p.push_back(std::stof(word));
-            word = "";
-        }else {
-            word = word + x;
-        }
-    }
+	// split text by space and convert them to floats
+	string word;
+	std::vector<float> p;
+	for (auto x : text)
+	{
+		if (x == ' ')
+		{
+			p.push_back(std::stof(word));
+			word = "";
+		}
+		else
+		{
+			word += x;
+		}
+	}
 
-    if (p.size() < 37) {
-        // better checks needed
-        ofSystemAlertDialog("Could not read the file!");
-    }
-    else {
-        powerSliderGG = p[0]; powerSliderGR = p[1]; powerSliderGW = p[2]; powerSliderGB = p[3];
-        vSliderGG = p[4]; vSliderGR = p[5]; vSliderGW = p[6]; vSliderGB = p[7];
-        powerSliderRG = p[8]; powerSliderRR = p[9]; powerSliderRW = p[10]; powerSliderRB = p[11];
-        vSliderRG = p[12]; vSliderRR = p[13]; vSliderRW = p[14]; vSliderRB = p[15];
-        powerSliderWG = p[16]; powerSliderWR = p[17]; powerSliderWW = p[18]; powerSliderWB = p[19];
-        vSliderWG = p[20]; vSliderWR = p[21]; vSliderWW = p[22]; vSliderWB = p[23];
-        powerSliderBG = p[24]; powerSliderBR = p[25]; powerSliderBW = p[26]; powerSliderBB = p[27];
-        vSliderBG = p[28]; vSliderBR = p[29]; vSliderBW = p[30]; vSliderBB = p[31];
-        numberSliderG = static_cast<int>(p[32]); numberSliderR = static_cast<int>(p[33]); numberSliderW = static_cast<int>(p[34]); numberSliderB = static_cast<int>(p[35]);
-        viscoSlider = p[36];
-    }
-    restart();
+	if (p.size() < 37)
+	{
+		// better checks needed
+		ofSystemAlertDialog("Could not read the file!");
+	}
+	else
+	{
+		powerSliderGG = p[0];
+		powerSliderGR = p[1];
+		powerSliderGW = p[2];
+		powerSliderGY = p[3];
+		vSliderGG = p[4];
+		vSliderGR = p[5];
+		vSliderGW = p[6];
+		vSliderGY = p[7];
+		powerSliderRG = p[8];
+		powerSliderRR = p[9];
+		powerSliderRW = p[10];
+		powerSliderRY = p[11];
+		vSliderRG = p[12];
+		vSliderRR = p[13];
+		vSliderRW = p[14];
+		vSliderRY = p[15];
+		powerSliderWG = p[16];
+		powerSliderWR = p[17];
+		powerSliderWW = p[18];
+		powerSliderWY = p[19];
+		vSliderWG = p[20];
+		vSliderWR = p[21];
+		vSliderWW = p[22];
+		vSliderWY = p[23];
+		powerSliderYG = p[24];
+		powerSliderYR = p[25];
+		powerSliderYW = p[26];
+		powerSliderYY = p[27];
+		vSliderYG = p[28];
+		vSliderYR = p[29];
+		vSliderYW = p[30];
+		vSliderYY = p[31];
+		numberSliderG = static_cast<int>(p[32]);
+		numberSliderR = static_cast<int>(p[33]);
+		numberSliderW = static_cast<int>(p[34]);
+		numberSliderY = static_cast<int>(p[35]);
+		viscoSlider = p[36];
+	}
+	probabilitySlider = 100;
+	restart();
 }
-
-
-
 
 
 //------------------------------GUI initialization------------------------------
-void ofApp::setup(){
-    lastTime = clock();
-    ofSetWindowTitle("Particle Life - www.brainxyz.com");
-    // Interface
-    gui.setup("Settings");
-    gui.loadFont("Arial", 12);
-    gui.setWidthElements(300.0f);
+void ofApp::setup()
+{
+	
+	lastTime = clock();
+	lastTime_draw = lastTime;
+	ofSetWindowTitle("Particle Life - www.brainxyz.com");
+	ofSetVerticalSync(false);
 
-    gui.add(resetButton.setup("START/RESTART"));
-    gui.add(randomChoice.setup("Randomize"));
-    gui.add(save.setup("Save Model"));
-    gui.add(load.setup("Load Model"));
-    gui.add(viscoSlider.setup("Viscosity/Friction", viscosity, 0, 1));
-    gui.add(gravitySlider.setup("Gravity", worldGravity, -1, 1));
-    gui.add(wallRepelSlider.setup("Wall Repel", wallRepel, 0, 100));
-    //gui.add(labelG.setup("GREEN:", "-"));
-    gui.add(numberSliderG.setup("GREEN:", pnumberSliderG, 0, 3000));
-    gui.add(powerSliderGG.setup("green x green:", ppowerSliderGG, -100, 100));
-    gui.add(powerSliderGR.setup("green x red:", ppowerSliderGR, -100, 100));
-    gui.add(powerSliderGW.setup("green x white:", ppowerSliderGW, -100, 100));
-    gui.add(powerSliderGB.setup("green x blue:", ppowerSliderGB, -100, 100));
+	// Interface
+	gui.setup("Settings");
+	gui.loadFont("Arial", 12);
+	gui.setWidthElements(300.0f);
 
-    gui.add(vSliderGG.setup("radius g x g:", pvSliderGG, 10, 500));
-    gui.add(vSliderGR.setup("radius g x r:", pvSliderGR, 10, 500));
-    gui.add(vSliderGW.setup("radius g x w:", pvSliderGW, 10, 500));
-    gui.add(vSliderGB.setup("radius g x b:", pvSliderGB, 10, 500));
+	gui.add(fps.setup("FPS", "0"));
 
-    //gui.add(labelR.setup("RED:", "-"));
-    gui.add(numberSliderR.setup("RED:", pnumberSliderR, 0, 3000));
-    gui.add(powerSliderRR.setup("red x red:", ppowerSliderRR, -100, 100));
-    gui.add(powerSliderRG.setup("red x green:", ppowerSliderRG, -100, 100));
-    gui.add(powerSliderRW.setup("red x white:", ppowerSliderRW, -100, 100));
-    gui.add(powerSliderRB.setup("red x blue:", ppowerSliderRB, -100, 100));
+	gui.add(resetButton.setup("Restart"));
+	gui.add(randomChoice.setup("Randomize (space bar)"));
+	gui.add(save.setup("Save Model"));
+	gui.add(load.setup("Load Model"));
+	gui.add(modelToggle.setup("Show Model", false));
 
-    gui.add(vSliderRG.setup("radius r x g:", pvSliderRG, 10, 500));
-    gui.add(vSliderRR.setup("radius r x r:", pvSliderRR, 10, 500));
-    gui.add(vSliderRW.setup("radius r x w:", pvSliderRW, 10, 500));
-    gui.add(vSliderRB.setup("radius r x b:", pvSliderRB, 10, 500));
+	globalGroup.setup("Global");
+	globalGroup.add(viscoSlider.setup("Viscosity/Friction", viscosity, 0, 1));
+	globalGroup.add(gravitySlider.setup("Gravity", worldGravity, -1, 1));
+	globalGroup.add(wallRepelSlider.setup("Wall Repel", wallRepel, 0, 100));
+	globalGroup.add(boundsToggle.setup("Bounded", false));
 
-    //gui.add(labelW.setup("WHITE:", "-"));
-    gui.add(numberSliderW.setup("WHITE:", pnumberSliderW, 0, 3000));
-    gui.add(powerSliderWW.setup("white x white:", ppowerSliderWW, -100, 100));
-    gui.add(powerSliderWR.setup("white x red:", ppowerSliderWR, -100, 100));
-    gui.add(powerSliderWG.setup("white x green:", ppowerSliderWG, -100, 100));
-    gui.add(powerSliderWB.setup("white x blue:", ppowerSliderWB, -100, 100));
+	gui.add(&globalGroup);
 
-    gui.add(vSliderWG.setup("radius w x g:", pvSliderWG, 10, 500));
-    gui.add(vSliderWR.setup("radius w x r:", pvSliderWR, 10, 500));
-    gui.add(vSliderWW.setup("radius w x w:", pvSliderWW, 10, 500));
-    gui.add(vSliderWB.setup("radius w x b:", pvSliderWB, 10, 500));
+	// Quantity
+	qtyGroup.setup("Quantity (require restart/randomize)");
+	qtyGroup.add(numberSliderG.setup("Green", pnumberSliderG, 0, 10000));
+	qtyGroup.add(numberSliderR.setup("Red", pnumberSliderR, 0, 10000));
+	qtyGroup.add(numberSliderW.setup("White", pnumberSliderW, 0, 10000));
+	qtyGroup.add(numberSliderY.setup("Yellow", pnumberSliderY, 0, 10000));
+	gui.add(&qtyGroup);
 
-    //gui.add(labelB.setup("BLUE:", "-"));
-    gui.add(numberSliderB.setup("BLUE:", pnumberSliderB, 0, 3000));
-    gui.add(powerSliderBB.setup("blue x blue:", ppowerSliderBB, -100, 100));
-    gui.add(powerSliderBW.setup("blue x white:", ppowerSliderBW, -100, 100));
-    gui.add(powerSliderBR.setup("blue x red:", ppowerSliderBR, -100, 100));
-    gui.add(powerSliderBG.setup("blue x green:", ppowerSliderBG, -100, 100));
+	// GREEN
+	greenGroup.setup("Green");
+	greenGroup.add(powerSliderGG.setup("green x green:", ppowerSliderGG, -100, 100));
+	greenGroup.add(powerSliderGR.setup("green x red:", ppowerSliderGR, -100, 100));
+	greenGroup.add(powerSliderGW.setup("green x white:", ppowerSliderGW, -100, 100));
+	greenGroup.add(powerSliderGY.setup("green x yellow:", ppowerSliderGY, -100, 100));
 
-    gui.add(vSliderBG.setup("radius b x g:", pvSliderBG, 10, 500));
-    gui.add(vSliderBR.setup("radius b x r:", pvSliderBR, 10, 500));
-    gui.add(vSliderBW.setup("radius b x w:", pvSliderBW, 10, 500));
-    gui.add(vSliderBB.setup("radius b x b:", pvSliderBB, 10, 500));
-    gui.add(boundsToggle.setup("Bounded", true));
-    gui.add(modelToggle.setup("Show Model", false));
-    gui.add(fps.setup("FPS", "0"));
+	greenGroup.add(vSliderGG.setup("radius g x g:", pvSliderGG, 10, 500));
+	greenGroup.add(vSliderGR.setup("radius g x r:", pvSliderGR, 10, 500));
+	greenGroup.add(vSliderGW.setup("radius g x w:", pvSliderGW, 10, 500));
+	greenGroup.add(vSliderGY.setup("radius g x y:", pvSliderGY, 10, 500));
 
-    restart();
+	greenGroup.minimize();
+	gui.add(&greenGroup);
+
+	// RED
+	redGroup.setup("Red");
+	redGroup.add(powerSliderRR.setup("red x red:", ppowerSliderRR, -100, 100));
+	redGroup.add(powerSliderRG.setup("red x green:", ppowerSliderRG, -100, 100));
+	redGroup.add(powerSliderRW.setup("red x white:", ppowerSliderRW, -100, 100));
+	redGroup.add(powerSliderRY.setup("red x yellow:", ppowerSliderRY, -100, 100));
+
+	redGroup.add(vSliderRG.setup("radius r x g:", pvSliderRG, 10, 500));
+	redGroup.add(vSliderRR.setup("radius r x r:", pvSliderRR, 10, 500));
+	redGroup.add(vSliderRW.setup("radius r x w:", pvSliderRW, 10, 500));
+	redGroup.add(vSliderRY.setup("radius r x y:", pvSliderRY, 10, 500));
+
+	redGroup.minimize();
+	gui.add(&redGroup);
+
+	// WHITE
+	whiteGroup.setup("White");
+	whiteGroup.add(powerSliderWW.setup("white x white:", ppowerSliderWW, -100, 100));
+	whiteGroup.add(powerSliderWR.setup("white x red:", ppowerSliderWR, -100, 100));
+	whiteGroup.add(powerSliderWG.setup("white x green:", ppowerSliderWG, -100, 100));
+	whiteGroup.add(powerSliderWY.setup("white x yellow:", ppowerSliderWY, -100, 100));
+
+	whiteGroup.add(vSliderWG.setup("radius w x g:", pvSliderWG, 10, 500));
+	whiteGroup.add(vSliderWR.setup("radius w x r:", pvSliderWR, 10, 500));
+	whiteGroup.add(vSliderWW.setup("radius w x w:", pvSliderWW, 10, 500));
+	whiteGroup.add(vSliderWY.setup("radius w x y:", pvSliderWY, 10, 500));
+
+	whiteGroup.minimize();
+	gui.add(&whiteGroup);
+
+	// yellow
+	yellowGroup.setup("Yellow");
+	yellowGroup.add(powerSliderYY.setup("yellow x yellow:", ppowerSliderYY, -100, 100));
+	yellowGroup.add(powerSliderYW.setup("yellow x white:", ppowerSliderYW, -100, 100));
+	yellowGroup.add(powerSliderYR.setup("yellow x red:", ppowerSliderYR, -100, 100));
+	yellowGroup.add(powerSliderYG.setup("yellow x green:", ppowerSliderYG, -100, 100));
+
+	yellowGroup.add(vSliderYG.setup("radius y x g:", pvSliderYG, 10, 500));
+	yellowGroup.add(vSliderYR.setup("radius y x r:", pvSliderYR, 10, 500));
+	yellowGroup.add(vSliderYW.setup("radius y x w:", pvSliderYW, 10, 500));
+	yellowGroup.add(vSliderYY.setup("radius y x y:", pvSliderYY, 10, 500));
+
+	yellowGroup.minimize();
+	gui.add(&yellowGroup);
+
+	expGroup.setup("Experimental");
+	expGroup.add(evoToggle.setup("Evolve parameters", false));
+	expGroup.add(evoProbSlider.setup("evo chance%", evoChance, 0, 100));
+	expGroup.add(evoAmountSlider.setup("evo amount%%", evoAmount, 0, 100));
+	//expGroup.add(radiusToogle.setup("infinite radius", false));
+	//expGroup.add(probabilitySlider.setup("interaction prob%", probability, 1, 100));
+	expGroup.add(motionBlurToggle.setup("Motion Blur", false));
+	expGroup.add(physicLabel.setup("physic (ms)", "0"));
+
+	expGroup.minimize();
+	gui.add(&expGroup);
+
+	ofSetBackgroundAuto(false);
+	//ofDisableAlphaBlending();
+
+	random();
+	restart();
 }
 
 //------------------------------Update simulation with sliders values------------------------------
-void ofApp::update(){
-    viscosity = viscoSlider;
-    worldGravity = gravitySlider;
-    wallRepel = wallRepelSlider;
-
-    if (numberSliderG > 0) {
-        interaction(&green, &green, powerSliderGG, vSliderGG);
-        interaction(&green, &red, powerSliderGR, vSliderGR);
-        interaction(&green, &white, powerSliderGW, vSliderGW);
-        interaction(&green, &blue, powerSliderGB, vSliderGB);
-    }
-
-    if (numberSliderR > 0) {
-        interaction(&red, &red, powerSliderRR, vSliderRR);
-        interaction(&red, &green, powerSliderRG, vSliderRG);
-        interaction(&red, &white, powerSliderRW, vSliderRW);
-        interaction(&red, &blue, powerSliderRB, vSliderRB);
-    }
-    if (numberSliderW > 0) {
-        interaction(&white, &white, powerSliderWW, vSliderWW);
-        interaction(&white, &green, powerSliderWG, vSliderWG);
-        interaction(&white, &red, powerSliderWR, vSliderWR);
-        interaction(&white, &blue, powerSliderWB, vSliderWB);
-    }
-    if (numberSliderB > 0) {
-        interaction(&blue, &white, powerSliderBW, vSliderBW);
-        interaction(&blue, &green, powerSliderBG, vSliderBG);
-        interaction(&blue, &red, powerSliderBR, vSliderBR);
-        interaction(&blue, &blue, powerSliderBB, vSliderBB);
-    }
-    
-    if (save) { saveSettings(); }
-    if (load) { loadSettings(); }
+void ofApp::update()
+{
+	probability  = probabilitySlider;
+	viscosity    = viscoSlider;
+	worldGravity = gravitySlider;
+	wallRepel    = wallRepelSlider;
+	evoChance    = evoProbSlider;
+	evoAmount    = evoAmountSlider;
 	
+	physic_begin = clock();
+	boundHeight  = ofGetHeight();
+	boundWidth   = ofGetWidth();
+
+
+	if (evoToggle && ofRandom(1.0F) < (evoChance / 100.0F))
+	{
+		for (auto& slider : powersliders) {
+			*slider = *slider + ((ofRandom(2.0F) - 1.0F) * (slider->getMax() - slider->getMin()) * (evoAmount / 100.0F));
+		}
+
+		for (auto& slider : vsliders) {
+			*slider = *slider + ((ofRandom(2.0F) - 1.0F) * (slider->getMax() - slider->getMin()) * (evoAmount / 100.0F));
+			if (*slider < 0.0F) *slider = 0;
+			if (*slider > 200.0F) *slider = 200.0F;
+		}
+	}
+
+	/*
+	oneapi::tbb::parallel_invoke(
+		[&] { interaction(red,   red,   powerSliderRR, vSliderRR, boundsToggle); },
+		[&] { interaction(red,   green, powerSliderRR, vSliderRG, boundsToggle); },
+		[&] { interaction(red,   yellow,  powerSliderRR, vSliderRY, boundsToggle); },
+		[&] { interaction(red,   white, powerSliderRR, vSliderRW, boundsToggle); },
+		[&] { interaction(green, red,   powerSliderGR, vSliderGR, boundsToggle); },
+		[&] { interaction(green, green, powerSliderGG, vSliderGG, boundsToggle); },
+		[&] { interaction(green, yellow,  powerSliderGY, vSliderGY, boundsToggle); },
+		[&] { interaction(green, white, powerSliderGW, vSliderGW, boundsToggle); },
+		[&] { interaction(yellow,  red,   powerSliderYR, vSliderYR, boundsToggle); },
+		[&] { interaction(yellow,  green, powerSliderYG, vSliderYG, boundsToggle); },
+		[&] { interaction(yellow,  yellow,  powerSliderYY, vSliderYY, boundsToggle); },
+		[&] { interaction(yellow,  white, powerSliderYW, vSliderYW, boundsToggle); },
+		[&] { interaction(white, red,   powerSliderWR, vSliderWR, boundsToggle); },
+		[&] { interaction(white, green, powerSliderWG, vSliderWG, boundsToggle); },
+		[&] { interaction(white, yellow,  powerSliderWY, vSliderWY, boundsToggle); },
+		[&] { interaction(white, white, powerSliderWW, vSliderWW, boundsToggle); }
+	);
+	*/
+
+		interaction(red,   red,   powerSliderRR, vSliderRR, boundsToggle); 
+		interaction(red,   green, powerSliderRR, vSliderRG, boundsToggle);
+		interaction(red,   yellow,  powerSliderRR, vSliderRY, boundsToggle); 
+		interaction(red,   white, powerSliderRR, vSliderRW, boundsToggle);
+		interaction(green, red,   powerSliderGR, vSliderGR, boundsToggle);
+		interaction(green, green, powerSliderGG, vSliderGG, boundsToggle);
+		interaction(green, yellow,  powerSliderGY, vSliderGY, boundsToggle);
+		interaction(green, white, powerSliderGW, vSliderGW, boundsToggle);
+		interaction(yellow,  red,   powerSliderYR, vSliderYR, boundsToggle);
+		interaction(yellow,  green, powerSliderYG, vSliderYG, boundsToggle);
+		interaction(yellow,  yellow,  powerSliderYY, vSliderYY, boundsToggle);
+		interaction(yellow,  white, powerSliderYW, vSliderYW, boundsToggle);
+		interaction(white, red,   powerSliderWR, vSliderWR, boundsToggle);
+		interaction(white, green, powerSliderWG, vSliderWG, boundsToggle);
+		interaction(white, yellow,  powerSliderWY, vSliderWY, boundsToggle);
+		interaction(white, white, powerSliderWW, vSliderWW, boundsToggle);
+		
+	
+	if (save) { saveSettings(); }
+	if (load) { loadSettings(); }
+	physic_delta = clock() - physic_begin;
 }
 
 //--------------------------------------------------------------
-void ofApp::draw(){
+void ofApp::draw()
+{
+	//fps counter
+	cntFps++;
+	now = clock();
+	delta = now - lastTime;
+	delta_draw = now - lastTime_draw;
 
-	ofBackground(0);  // Clear the screen with a black color
+		if (motionBlurToggle)
+		{
+			ofSetColor(0, 0, 0, 64);
+			ofDrawRectangle(0, 0, boundWidth, boundHeight);
+		}
+		else
+		{
+			ofClear(0);
+		}
 
-    //fps counter
-    cntFps++;
-    now = clock();
-    delta = now - lastTime;
+		//Time step
+		if (delta >= 1000)
+		{
+			lastTime = now;
+			fps.setup("FPS", to_string(static_cast<int>((1000 / static_cast<float>(delta)) * cntFps)));
+			physicLabel.setup("physics (ms)", to_string(physic_delta));
 
-	//Time step
-    if (delta >= 1000)
-    {
-        lastTime = now;
+			cntFps = 0;
+		}
 
-        fps.setup("FPS", to_string(static_cast<int>((1000 / static_cast<double>(delta)) * cntFps)));
-        cntFps = 0;
-    }
+		//Check for GUI interaction
+		if (resetButton) { restart(); }
+		if (randomChoice)
+		{
+			random();
+			restart();
+		}
+			
+			if (numberSliderW > 0) { Draw(white); }
+			if (numberSliderR > 0) { Draw(red); }
+			if (numberSliderG > 0) { Draw(green); }
+			if (numberSliderY > 0) { Draw(yellow); }
+			lastTime_draw = now;
 
-	//Check for GUI interaction
-    if (resetButton) { restart(); }
-    if (randomChoice) { random(); restart(); }
-    if (numberSliderW > 0) { Draw(&white); }
-    if (numberSliderR > 0) { Draw(&red); }
-    if (numberSliderG > 0) { Draw(&green); }
-    if (numberSliderB > 0) { Draw(&blue); }
-
-
-	//Draw GUI
-    if (modelToggle == true) {
-
-        ofSetColor(0, 0, 0);
-        ofDrawCircle(xshift, yshift, 150);
-
-        ofSetLineWidth(5);
-        ofSetColor(150 - powerSliderGR, 150 + powerSliderGR, 150);
-        ofDrawLine(p1x, p1y - 10, p2x, p2y - 10);
-        ofSetColor(150 - powerSliderRG, 150 + powerSliderRG, 150);
-        ofDrawLine(p1x, p1y + 10, p2x, p2y + 10);
-        ofSetColor(150 - powerSliderGW, 150 + powerSliderGW, 150);
-        ofDrawLine(p3x, p3y - 10, p1x, p1y - 10);
-        ofSetColor(150 - powerSliderWG, 150 + powerSliderWG, 150);
-        ofDrawLine(p3x, p3y + 10, p1x, p1y + 10);
-
-        ofSetColor(150 - powerSliderGB, 150 + powerSliderGB, 150);
-        ofDrawLine(p4x - 10, p4y, p1x - 10, p1y);
-        ofSetColor(150 - powerSliderBG, 150 + powerSliderBG, 150);
-        ofDrawLine(p4x + 10, p4y, p1x + 10, p1y);
-
-        ofSetColor(150 - powerSliderRW, 150 + powerSliderRW, 150);
-        ofDrawLine(p2x - 10, p2y, p3x - 10, p3y);
-        ofSetColor(150 - powerSliderWR, 150 + powerSliderWR, 150);
-        ofDrawLine(p2x + 10, p2y, p3x + 10, p3y);
-
-        ofSetColor(150 - powerSliderRB, 150 + powerSliderRB, 150);
-        ofDrawLine(p2x, p2y - 10, p4x, p4y - 10);
-        ofSetColor(150 - powerSliderBR, 150 + powerSliderBR, 150);
-        ofDrawLine(p2x, p2y + 10, p4x, p4y + 10);
-
-        ofSetColor(150 - powerSliderWB, 150 + powerSliderWB, 150);
-        ofDrawLine(p3x, p3y - 10, p4x, p4y - 10);
-        ofSetColor(150 - powerSliderBW, 150 + powerSliderBW, 150);
-        ofDrawLine(p3x, p3y + 10, p4x, p4y + 10);
-
-        ofNoFill();
-        ofSetColor(150 - powerSliderGG, 150 + powerSliderGG, 150);
-        ofDrawCircle(p1x - 20, p1y - 20, rr + 20);
-        ofSetColor(150 - powerSliderRR, 150 + powerSliderRR, 150);
-        ofDrawCircle(p2x + 20, p2y - 20, rr + 20);
-        ofSetColor(150 - powerSliderWW, 150 + powerSliderWW, 150);
-        ofDrawCircle(p3x + 20, p3y + 20, rr + 20);
-        ofSetColor(150 - powerSliderBB, 150 + powerSliderBB, 150);
-        ofDrawCircle(p4x - 20, p4y + 20, rr + 20);
-
-        ofFill();
-        ofSetColor(100, 250, 10);
-        ofDrawCircle(p1x, p1y, rr);
-        ofSetColor(250, 10, 100);
-        ofDrawCircle(p2x, p2y, rr);
-        ofSetColor(250, 250, 250);
-        ofDrawCircle(p3x, p3y, rr);
-        ofSetColor(100, 100, 250);
-        ofDrawCircle(p4x, p4y, rr);
-    }
-    gui.draw();
+			gui.draw();
 }
 
+void ofApp::keyPressed(int key)
+{
+	if(key == ' ')
+	{
+		random();
+		restart();
+	}
+}
